@@ -137,11 +137,6 @@ UI, Workflows & Features
    command line, or setting sendemail.suppresscc configuration
    variable to "misc-by", can be used to disable this behaviour.
 
- * Developer builds now uses -Wunused-function compilation option.
-
- * One of our CI tests to run with "unusual/experimental/random"
-   settings now also uses commit-graph and midx.
-
  * "git mergetool" learned to take the "--[no-]gui" option, just like
    "git difftool" does.
 
@@ -184,6 +179,11 @@ UI, Workflows & Features
 
 
 Performance, Internal Implementation, Development Support etc.
+
+ * Developer builds now use -Wunused-function compilation option.
+
+ * One of our CI tests to run with "unusual/experimental/random"
+   settings now also uses commit-graph and midx.
 
  * When there are too many packfiles in a repository (which is not
    recommended), looking up an object in these would require
@@ -305,7 +305,7 @@ Performance, Internal Implementation, Development Support etc.
 
  * The overly large Documentation/config.txt file have been split into
    million little pieces.  This potentially allows each individual piece
-   included into the manual page of the command it affects more easily.
+   to be included into the manual page of the command it affects more easily.
 
  * Replace three string-list instances used as look-up tables in "git
    fetch" with hashmaps.
@@ -386,6 +386,14 @@ Performance, Internal Implementation, Development Support etc.
  * A coding convention around the Coccinelle semantic patches to have
    two classes to ease code migration process has been proposed and
    its support has been added to the Makefile.
+
+ * The "container" mode of TravisCI is going away.  Our .travis.yml
+   file is getting prepared for the transition.
+   (merge 32ee384be8 ss/travis-ci-force-vm-mode later to maint).
+
+ * Our test scripts can now take the '-V' option as a synonym for the
+   '--verbose-log' option.
+   (merge a5f52c6dab sg/test-verbose-log later to maint).
 
 
 Fixes since v2.19
@@ -544,14 +552,6 @@ Fixes since v2.19
    didn't make much sense.  This has been corrected.
    (merge 669b1d2aae md/exclude-promisor-objects-fix later to maint).
 
- * The "container" mode of TravisCI is going away.  Our .travis.yml
-   file is getting prepared for the transition.
-   (merge 32ee384be8 ss/travis-ci-force-vm-mode later to maint).
-
- * Our test scripts can now take the '-V' option as a synonym for the
-   '--verbose-log' option.
-   (merge a5f52c6dab sg/test-verbose-log later to maint).
-
  * A regression in Git 2.12 era made "git fsck" fall into an infinite
    loop while processing truncated loose objects.
    (merge 18ad13e5b2 jk/detect-truncated-zlib-input later to maint).
@@ -578,7 +578,7 @@ Fixes since v2.19
 
  * "git rev-parse --exclude=* --branches --branches"  (i.e. first
    saying "add only things that do not match '*' out of all branches"
-   and then adding all branches, without any exclusion this time")
+   and then adding all branches, without any exclusion this time)
    worked as expected, but "--exclude=* --all --all" did not work the
    same way, which has been fixed.
    (merge 5221048092 ag/rev-parse-all-exclude-fix later to maint).
@@ -639,6 +639,22 @@ Fixes since v2.19
    adjusted for shared repository settings.  This was made consistent.
    (merge c9d6c78870 cc/shared-index-permbits later to maint).
 
+ * "git rebase --stat" to transplant a piece of history onto a totally
+   unrelated history were not working before and silently showed wrong
+   result.  With the recent reimplementation in C, it started to instead
+   die with an error message, as the original logic was not prepared
+   to cope with this case.  This has now been fixed.
+
+ * The advice message to tell the user to migrate an existing graft
+   file to the replace system when a graft file was read was shown
+   even when "git replace --convert-graft-file" command, which is the
+   way the message suggests to use, was running, which made little
+   sense.
+   (merge 8821e90a09 ab/replace-graft-with-replace-advice later to maint).
+
+ * "git diff --raw" lost ellipses to adjust the output columns for
+   some time now, but the documentation still showed them.
+
  * Code cleanup, docfix, build fix, etc.
    (merge 96a7501aad ts/doc-build-manpage-xsl-quietly later to maint).
    (merge b9b07efdb2 tg/conflict-marker-size later to maint).
@@ -679,3 +695,6 @@ Fixes since v2.19
    (merge 8c64bc9420 sg/test-rebase-editor-fix later to maint).
    (merge 71571cd7d6 ma/sequencer-do-reset-saner-loop-termination later to maint).
    (merge 9a4cb8781e cb/notes-freeing-always-null-fix later to maint).
+   (merge 3006f5ee16 ma/reset-doc-rendering-fix later to maint).
+   (merge 4c2eb06419 sg/daemon-test-signal-fix later to maint).
+   (merge d27525e519 ss/msvc-strcasecmp later to maint).

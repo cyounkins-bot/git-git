@@ -82,6 +82,10 @@ static int list_replace_refs(const char *pattern, const char *format)
 		data.format = REPLACE_FORMAT_MEDIUM;
 	else if (!strcmp(format, "long"))
 		data.format = REPLACE_FORMAT_LONG;
+	/*
+	 * Please update _git_replace() in git-completion.bash when
+	 * you add new format
+	 */
 	else
 		return error(_("invalid replace format '%s'\n"
 			       "valid formats are 'short', 'medium' and 'long'"),
@@ -295,7 +299,7 @@ static int import_object(struct object_id *oid, enum object_type type,
 			close(fd);
 			return -1;
 		}
-		if (index_fd(&the_index, oid, fd, &st, type, NULL, flags) < 0)
+		if (index_fd(the_repository->index, oid, fd, &st, type, NULL, flags) < 0)
 			return error(_("unable to write object to database"));
 		/* index_fd close()s fd for us */
 	}
@@ -495,6 +499,7 @@ static int convert_graft_file(int force)
 	if (!fp)
 		return -1;
 
+	advice_graft_file_deprecated = 0;
 	while (strbuf_getline(&buf, fp) != EOF) {
 		if (*buf.buf == '#')
 			continue;

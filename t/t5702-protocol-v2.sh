@@ -471,6 +471,53 @@ test_expect_success 'upload-pack respects client shallows' '
 	grep "fetch< version 2" trace
 '
 
+test_expect_success 'ensure that multiple fetches in same process from a shallow repo works' '
+	rm -rf server client trace &&
+
+	test_create_repo server &&
+	test_commit -C server one &&
+	test_commit -C server two &&
+	test_commit -C server three &&
+	git clone --shallow-exclude two "file://$(pwd)/server" client &&
+
+	git -C server tag -a -m "an annotated tag" twotag two &&
+
+	# Triggers tag following (thus, 2 fetches in one process)
+	GIT_TRACE_PACKET="$(pwd)/trace" git -C client -c protocol.version=2 \
+		fetch --shallow-exclude one origin &&
+	# Ensure that protocol v2 is used
+	grep "fetch< version 2" trace
+'
+
+test_expect_success 'deepen-relative' '
+	rm -rf server client trace &&
+
+	test_create_repo server &&
+	test_commit -C server one &&
+	test_commit -C server two &&
+	test_commit -C server three &&
+	git clone --depth 1 "file://$(pwd)/server" client &&
+	test_commit -C server four &&
+
+	# Sanity check that only "three" is downloaded
+	git -C client log --pretty=tformat:%s master >actual &&
+	echo three >expected &&
+	test_cmp expected actual &&
+
+	GIT_TRACE_PACKET="$(pwd)/trace" git -C client -c protocol.version=2 \
+		fetch --deepen=1 origin &&
+	# Ensure that protocol v2 is used
+	grep "fetch< version 2" trace &&
+
+	git -C client log --pretty=tformat:%s origin/master >actual &&
+	cat >expected <<-\EOF &&
+	four
+	three
+	two
+	EOF
+	test_cmp expected actual
+'
+
 # Test protocol v2 with 'http://' transport
 #
 . "$TEST_DIRECTORY"/lib-httpd.sh
@@ -495,7 +542,38 @@ test_expect_success 'clone with http:// using protocol v2' '
 	# Client requested to use protocol v2
 	grep "Git-Protocol: version=2" log &&
 	# Server responded using protocol v2
-	grep "git< version 2" log
+	grep "git< version 2" log &&
+	# Verify that the chunked encoding sending codepath is NOT exercised
+	! grep "Send header: Transfer-Encoding: chunked" log
+'
+
+test_expect_success 'clone big repository with http:// using protocol v2' '
+	test_when_finished "rm -f log" &&
+
+	git init "$HTTPD_DOCUMENT_ROOT_PATH/big" &&
+	# Ensure that the list of wants is greater than http.postbuffer below
+	for i in $(test_seq 1 1500)
+	do
+		# do not use here-doc, because it requires a process
+		# per loop iteration
+		echo "commit refs/heads/too-many-refs-$i" &&
+		echo "committer git <git@example.com> $i +0000" &&
+		echo "data 0" &&
+		echo "M 644 inline bla.txt" &&
+		echo "data 4" &&
+		echo "bla"
+	done | git -C "$HTTPD_DOCUMENT_ROOT_PATH/big" fast-import &&
+
+	GIT_TRACE_PACKET="$(pwd)/log" GIT_TRACE_CURL="$(pwd)/log" git \
+		-c protocol.version=2 -c http.postbuffer=65536 \
+		clone "$HTTPD_URL/smart/big" big_child &&
+
+	# Client requested to use protocol v2
+	grep "Git-Protocol: version=2" log &&
+	# Server responded using protocol v2
+	grep "git< version 2" log &&
+	# Verify that the chunked encoding sending codepath is exercised
+	grep "Send header: Transfer-Encoding: chunked" log
 '
 
 test_expect_success 'fetch with http:// using protocol v2' '
@@ -512,6 +590,27 @@ test_expect_success 'fetch with http:// using protocol v2' '
 
 	# Server responded using protocol v2
 	grep "git< version 2" log
+'
+
+test_expect_success 'fetch from namespaced repo respects namespaces' '
+	test_when_finished "rm -f log" &&
+
+	git init "$HTTPD_DOCUMENT_ROOT_PATH/nsrepo" &&
+	test_commit -C "$HTTPD_DOCUMENT_ROOT_PATH/nsrepo" one &&
+	test_commit -C "$HTTPD_DOCUMENT_ROOT_PATH/nsrepo" two &&
+	git -C "$HTTPD_DOCUMENT_ROOT_PATH/nsrepo" \
+		update-ref refs/namespaces/ns/refs/heads/master one &&
+
+	GIT_TRACE_PACKET="$(pwd)/log" git -C http_child -c protocol.version=2 \
+		fetch "$HTTPD_URL/smart_namespace/nsrepo" \
+		refs/heads/master:refs/heads/theirs &&
+
+	# Server responded using protocol v2
+	grep "fetch< version 2" log &&
+
+	git -C "$HTTPD_DOCUMENT_ROOT_PATH/nsrepo" rev-parse one >expect &&
+	git -C http_child rev-parse theirs >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'push with http:// and a config of v2 does not request v2' '
@@ -583,11 +682,9 @@ test_expect_success 'when server does not send "ready", expect FLUSH' '
 	test_must_fail env GIT_TRACE_PACKET="$(pwd)/log" git -C http_child \
 		-c protocol.version=2 \
 		fetch "$HTTPD_URL/one_time_sed/http_parent" 2> err &&
-	grep "fetch< acknowledgments" log &&
-	! grep "fetch< ready" log &&
+	grep "fetch< .*acknowledgments" log &&
+	! grep "fetch< .*ready" log &&
 	test_i18ngrep "expected no other sections to be sent after no .ready." err
 '
-
-stop_httpd
 
 test_done

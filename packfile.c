@@ -235,7 +235,7 @@ struct packed_git *parse_pack_index(unsigned char *sha1, const char *idx_path)
 	struct packed_git *p = alloc_packed_git(alloc);
 
 	memcpy(p->pack_name, path, alloc); /* includes NUL */
-	hashcpy(p->sha1, sha1);
+	hashcpy(p->hash, sha1);
 	if (check_packed_git_idx(idx_path, p)) {
 		free(p);
 		return NULL;
@@ -309,7 +309,7 @@ void close_pack_windows(struct packed_git *p)
 	}
 }
 
-static int close_pack_fd(struct packed_git *p)
+int close_pack_fd(struct packed_git *p)
 {
 	if (p->pack_fd < 0)
 		return 0;
@@ -466,6 +466,16 @@ static unsigned int get_max_fd_limit(void)
 #endif
 }
 
+const char *pack_basename(struct packed_git *p)
+{
+	const char *ret = strrchr(p->pack_name, '/');
+	if (ret)
+		ret = ret + 1; /* skip past slash */
+	else
+		ret = p->pack_name; /* we only have a base */
+	return ret;
+}
+
 /*
  * Do not call this directly as this leaks p->pack_fd on error return;
  * call open_packed_git() instead.
@@ -482,7 +492,7 @@ static int open_packed_git_1(struct packed_git *p)
 
 	if (!p->index_data) {
 		struct multi_pack_index *m;
-		const char *pack_name = strrchr(p->pack_name, '/');
+		const char *pack_name = pack_basename(p);
 
 		for (m = the_repository->objects->multi_pack_index;
 		     m; m = m->next) {
@@ -722,8 +732,8 @@ struct packed_git *add_packed_git(const char *path, size_t path_len, int local)
 	p->pack_local = local;
 	p->mtime = st.st_mtime;
 	if (path_len < the_hash_algo->hexsz ||
-	    get_sha1_hex(path + path_len - the_hash_algo->hexsz, p->sha1))
-		hashclr(p->sha1);
+	    get_sha1_hex(path + path_len - the_hash_algo->hexsz, p->hash))
+		hashclr(p->hash);
 	return p;
 }
 
@@ -971,16 +981,16 @@ static void prepare_packed_git_mru(struct repository *r)
 
 static void prepare_packed_git(struct repository *r)
 {
-	struct alternate_object_database *alt;
+	struct object_directory *odb;
 
 	if (r->objects->packed_git_initialized)
 		return;
-	prepare_multi_pack_index_one(r, r->objects->objectdir, 1);
-	prepare_packed_git_one(r, r->objects->objectdir, 1);
+
 	prepare_alt_odb(r);
-	for (alt = r->objects->alt_odb_list; alt; alt = alt->next) {
-		prepare_multi_pack_index_one(r, alt->path, 0);
-		prepare_packed_git_one(r, alt->path, 0);
+	for (odb = r->objects->odb; odb; odb = odb->next) {
+		int local = (odb == r->objects->odb);
+		prepare_multi_pack_index_one(r, odb->path, local);
+		prepare_packed_git_one(r, odb->path, local);
 	}
 	rearrange_packed_git(r);
 
@@ -992,6 +1002,11 @@ static void prepare_packed_git(struct repository *r)
 
 void reprepare_packed_git(struct repository *r)
 {
+	struct object_directory *odb;
+
+	for (odb = r->objects->odb; odb; odb = odb->next)
+		odb_clear_loose_cache(odb);
+
 	r->objects->approximate_object_count_valid = 0;
 	r->objects->packed_git_initialized = 0;
 	prepare_packed_git(r);
@@ -1143,12 +1158,13 @@ void mark_bad_packed_object(struct packed_git *p, const unsigned char *sha1)
 	p->num_bad_objects++;
 }
 
-const struct packed_git *has_packed_and_bad(const unsigned char *sha1)
+const struct packed_git *has_packed_and_bad(struct repository *r,
+					    const unsigned char *sha1)
 {
 	struct packed_git *p;
 	unsigned i;
 
-	for (p = the_repository->objects->packed_git; p; p = p->next)
+	for (p = r->objects->packed_git; p; p = p->next)
 		for (i = 0; i < p->num_bad_objects; i++)
 			if (hasheq(sha1,
 				   p->bad_object_sha1 + the_hash_algo->rawsz * i))
@@ -2017,8 +2033,10 @@ int for_each_object_in_pack(struct packed_git *p,
 	uint32_t i;
 	int r = 0;
 
-	if (flags & FOR_EACH_OBJECT_PACK_ORDER)
-		load_pack_revindex(p);
+	if (flags & FOR_EACH_OBJECT_PACK_ORDER) {
+		if (load_pack_revindex(p))
+			return -1;
+	}
 
 	for (i = 0; i < p->num_objects; i++) {
 		uint32_t pos;
@@ -2092,7 +2110,7 @@ static int add_promisor_object(const struct object_id *oid,
 			 */
 			return 0;
 		while (tree_entry_gently(&desc, &entry))
-			oidset_insert(set, entry.oid);
+			oidset_insert(set, &entry.oid);
 	} else if (obj->type == OBJ_COMMIT) {
 		struct commit *commit = (struct commit *) obj;
 		struct commit_list *parents = commit->parents;

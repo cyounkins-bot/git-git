@@ -8,6 +8,7 @@
 #include "sha1-lookup.h"
 #include "midx.h"
 #include "progress.h"
+#include "trace2.h"
 
 #define MIDX_SIGNATURE 0x4d494458 /* "MIDX" */
 #define MIDX_VERSION 1
@@ -70,7 +71,7 @@ struct multi_pack_index *load_multi_pack_index(const char *object_dir, int local
 
 	midx_map = xmmap(NULL, midx_size, PROT_READ, MAP_PRIVATE, fd, 0);
 
-	FLEX_ALLOC_MEM(m, object_dir, object_dir, strlen(object_dir));
+	FLEX_ALLOC_STR(m, object_dir, object_dir);
 	m->fd = fd;
 	m->data = midx_map;
 	m->data_len = midx_size;
@@ -163,6 +164,9 @@ struct multi_pack_index *load_multi_pack_index(const char *object_dir, int local
 			      m->pack_names[i - 1],
 			      m->pack_names[i]);
 	}
+
+	trace2_data_intmax("midx", the_repository, "load/num_packs", m->num_packs);
+	trace2_data_intmax("midx", the_repository, "load/num_objects", m->num_objects);
 
 	return m;
 
@@ -307,7 +311,39 @@ int fill_midx_entry(const struct object_id *oid, struct pack_entry *e, struct mu
 	return nth_midxed_pack_entry(m, e, pos);
 }
 
-int midx_contains_pack(struct multi_pack_index *m, const char *idx_name)
+/* Match "foo.idx" against either "foo.pack" _or_ "foo.idx". */
+static int cmp_idx_or_pack_name(const char *idx_or_pack_name,
+				const char *idx_name)
+{
+	/* Skip past any initial matching prefix. */
+	while (*idx_name && *idx_name == *idx_or_pack_name) {
+		idx_name++;
+		idx_or_pack_name++;
+	}
+
+	/*
+	 * If we didn't match completely, we may have matched "pack-1234." and
+	 * be left with "idx" and "pack" respectively, which is also OK. We do
+	 * not have to check for "idx" and "idx", because that would have been
+	 * a complete match (and in that case these strcmps will be false, but
+	 * we'll correctly return 0 from the final strcmp() below.
+	 *
+	 * Technically this matches "fooidx" and "foopack", but we'd never have
+	 * such names in the first place.
+	 */
+	if (!strcmp(idx_name, "idx") && !strcmp(idx_or_pack_name, "pack"))
+		return 0;
+
+	/*
+	 * This not only checks for a complete match, but also orders based on
+	 * the first non-identical character, which means our ordering will
+	 * match a raw strcmp(). That makes it OK to use this to binary search
+	 * a naively-sorted list.
+	 */
+	return strcmp(idx_or_pack_name, idx_name);
+}
+
+int midx_contains_pack(struct multi_pack_index *m, const char *idx_or_pack_name)
 {
 	uint32_t first = 0, last = m->num_packs;
 
@@ -317,7 +353,7 @@ int midx_contains_pack(struct multi_pack_index *m, const char *idx_name)
 		int cmp;
 
 		current = m->pack_names[mid];
-		cmp = strcmp(idx_name, current);
+		cmp = cmp_idx_or_pack_name(idx_or_pack_name, current);
 		if (!cmp)
 			return 1;
 		if (cmp > 0) {
@@ -931,7 +967,7 @@ cleanup:
 
 void clear_midx_file(struct repository *r)
 {
-	char *midx = get_midx_filename(r->objects->objectdir);
+	char *midx = get_midx_filename(r->objects->odb->path);
 
 	if (r->objects && r->objects->multi_pack_index) {
 		close_midx(r->objects->multi_pack_index);
@@ -958,8 +994,35 @@ static void midx_report(const char *fmt, ...)
 	va_end(ap);
 }
 
+struct pair_pos_vs_id
+{
+	uint32_t pos;
+	uint32_t pack_int_id;
+};
+
+static int compare_pair_pos_vs_id(const void *_a, const void *_b)
+{
+	struct pair_pos_vs_id *a = (struct pair_pos_vs_id *)_a;
+	struct pair_pos_vs_id *b = (struct pair_pos_vs_id *)_b;
+
+	return b->pack_int_id - a->pack_int_id;
+}
+
+/*
+ * Limit calls to display_progress() for performance reasons.
+ * The interval here was arbitrarily chosen.
+ */
+#define SPARSE_PROGRESS_INTERVAL (1 << 12)
+#define midx_display_sparse_progress(progress, n) \
+	do { \
+		uint64_t _n = (n); \
+		if ((_n & (SPARSE_PROGRESS_INTERVAL - 1)) == 0) \
+			display_progress(progress, _n); \
+	} while (0)
+
 int verify_midx_file(const char *object_dir)
 {
+	struct pair_pos_vs_id *pairs = NULL;
 	uint32_t i;
 	struct progress *progress;
 	struct multi_pack_index *m = load_multi_pack_index(object_dir, 1);
@@ -968,10 +1031,15 @@ int verify_midx_file(const char *object_dir)
 	if (!m)
 		return 0;
 
+	progress = start_progress(_("Looking for referenced packfiles"),
+				  m->num_packs);
 	for (i = 0; i < m->num_packs; i++) {
 		if (prepare_midx_pack(m, i))
 			midx_report("failed to load pack in position %d", i);
+
+		display_progress(progress, i + 1);
 	}
+	stop_progress(&progress);
 
 	for (i = 0; i < 255; i++) {
 		uint32_t oid_fanout1 = ntohl(m->chunk_oid_fanout[i]);
@@ -982,6 +1050,8 @@ int verify_midx_file(const char *object_dir)
 				    i, oid_fanout1, oid_fanout2, i + 1);
 	}
 
+	progress = start_sparse_progress(_("Verifying OID order in MIDX"),
+					 m->num_objects - 1);
 	for (i = 0; i < m->num_objects - 1; i++) {
 		struct object_id oid1, oid2;
 
@@ -991,18 +1061,47 @@ int verify_midx_file(const char *object_dir)
 		if (oidcmp(&oid1, &oid2) >= 0)
 			midx_report(_("oid lookup out of order: oid[%d] = %s >= %s = oid[%d]"),
 				    i, oid_to_hex(&oid1), oid_to_hex(&oid2), i + 1);
+
+		midx_display_sparse_progress(progress, i + 1);
+	}
+	stop_progress(&progress);
+
+	/*
+	 * Create an array mapping each object to its packfile id.  Sort it
+	 * to group the objects by packfile.  Use this permutation to visit
+	 * each of the objects and only require 1 packfile to be open at a
+	 * time.
+	 */
+	ALLOC_ARRAY(pairs, m->num_objects);
+	for (i = 0; i < m->num_objects; i++) {
+		pairs[i].pos = i;
+		pairs[i].pack_int_id = nth_midxed_pack_int_id(m, i);
 	}
 
-	progress = start_progress(_("Verifying object offsets"), m->num_objects);
+	progress = start_sparse_progress(_("Sorting objects by packfile"),
+					 m->num_objects);
+	display_progress(progress, 0); /* TODO: Measure QSORT() progress */
+	QSORT(pairs, m->num_objects, compare_pair_pos_vs_id);
+	stop_progress(&progress);
+
+	progress = start_sparse_progress(_("Verifying object offsets"), m->num_objects);
 	for (i = 0; i < m->num_objects; i++) {
 		struct object_id oid;
 		struct pack_entry e;
 		off_t m_offset, p_offset;
 
-		nth_midxed_object_oid(&oid, m, i);
+		if (i > 0 && pairs[i-1].pack_int_id != pairs[i].pack_int_id &&
+		    m->packs[pairs[i-1].pack_int_id])
+		{
+			close_pack_fd(m->packs[pairs[i-1].pack_int_id]);
+			close_pack_index(m->packs[pairs[i-1].pack_int_id]);
+		}
+
+		nth_midxed_object_oid(&oid, m, pairs[i].pos);
+
 		if (!fill_midx_entry(&oid, &e, m)) {
 			midx_report(_("failed to load pack entry for oid[%d] = %s"),
-				    i, oid_to_hex(&oid));
+				    pairs[i].pos, oid_to_hex(&oid));
 			continue;
 		}
 
@@ -1017,11 +1116,13 @@ int verify_midx_file(const char *object_dir)
 
 		if (m_offset != p_offset)
 			midx_report(_("incorrect object offset for oid[%d] = %s: %"PRIx64" != %"PRIx64),
-				    i, oid_to_hex(&oid), m_offset, p_offset);
+				    pairs[i].pos, oid_to_hex(&oid), m_offset, p_offset);
 
-		display_progress(progress, i + 1);
+		midx_display_sparse_progress(progress, i + 1);
 	}
 	stop_progress(&progress);
+
+	free(pairs);
 
 	return verify_midx_error;
 }

@@ -242,7 +242,7 @@ again:
 	}
 
 	ret = !wildmatch(pattern.buf + prefix, text.buf + prefix,
-			 icase ? WM_CASEFOLD : 0);
+			 WM_PATHNAME | (icase ? WM_CASEFOLD : 0));
 
 	if (!ret && !already_tried_absolute) {
 		/*
@@ -1445,7 +1445,9 @@ int git_default_config(const char *var, const char *value, void *cb)
 	if (starts_with(var, "core."))
 		return git_default_core_config(var, value, cb);
 
-	if (starts_with(var, "user."))
+	if (starts_with(var, "user.") ||
+	    starts_with(var, "author.") ||
+	    starts_with(var, "committer."))
 		return git_ident_config(var, value, cb);
 
 	if (starts_with(var, "i18n."))
@@ -2565,7 +2567,6 @@ static ssize_t write_pair(int fd, const char *key, const char *value,
  * entry (which all are to be removed).
  */
 static void maybe_remove_section(struct config_store_data *store,
-				 const char *contents,
 				 size_t *begin_offset, size_t *end_offset,
 				 int *seen_ptr)
 {
@@ -2656,6 +2657,8 @@ int git_config_set_gently(const char *key, const char *value)
 void git_config_set(const char *key, const char *value)
 {
 	git_config_set_multivar(key, value, NULL, 0);
+
+	trace2_cmd_set_config(key, value);
 }
 
 /*
@@ -2850,7 +2853,7 @@ int git_config_set_multivar_in_file_gently(const char *config_filename,
 				replace_end = store.parsed[j].end;
 				copy_end = store.parsed[j].begin;
 				if (!value)
-					maybe_remove_section(&store, contents,
+					maybe_remove_section(&store,
 							     &copy_end,
 							     &replace_end, &i);
 				/*
